@@ -246,3 +246,6 @@ fabric.properties
 
 # WandB
 wandb/
+
+# Data Folders
+data/
