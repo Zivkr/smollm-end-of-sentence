@@ -1,6 +1,4 @@
 import os
-
-import torch
 import random
 import pandas as pd
 import torch
@@ -13,8 +11,8 @@ import wandb
 
 batch_size = 24
 learning_rate = 3e-4
-epochs = 2
-checkpoint = "HuggingFaceTB/SmolLM2-360M"
+epochs = 1
+base_checkpoint = "HuggingFaceTB/SmolLM2-360M"
 checkpoint_path = "checkpoints/checkpoint_epoch_2.pth"
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 chance_to_remove_end = 0.8
@@ -56,8 +54,8 @@ class EosDataset(Dataset):
 class SmolLM(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-        self.base_model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
+        self.tokenizer = AutoTokenizer.from_pretrained(base_checkpoint)
+        self.base_model = AutoModelForCausalLM.from_pretrained(base_checkpoint).to(device)
         self.base_model.lm_head = nn.Identity()
         self.classifier = nn.Sequential(
             # nn.Linear(self.base_model.lm_head.out_features, 1024),
@@ -83,11 +81,6 @@ class SmolLM(torch.nn.Module):
         # self.model.config.output_hidden_states = True
 
     def forward(self, x):
-        # out = self.base_model(x["input_ids"])
-        # logits = out.logits[:, -1, :]  # Select the last token's logits
-        # logits = self.classifier(logits)
-        # return logits.squeeze(-1)
-        # Ensure that the input dictionary contains both "input_ids" and "attention_mask"
         input_ids = x["input_ids"]
         attention_mask = x["attention_mask"]
 
@@ -110,17 +103,17 @@ class SmolLM(torch.nn.Module):
 
 if __name__ == "__main__":
     # Load dataset
-    # train_dataset = load_dataframe_shuffle("train_split_hard.csv", shuffle=False)
-    # test_dataset = load_dataframe_shuffle("test_split_hard.csv", shuffle=False)
     train_dataset = EosDataset("data/train_split.csv")
     test_dataset = EosDataset("data/test_split.csv")
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4,
+                                  persistent_workers=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4,
+                                 persistent_workers=True)
     print(f"Train dataset size: {len(train_dataset)}, Test dataset size: {len(test_dataset)}")
 
     model = SmolLM().to(device)
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained(base_checkpoint)
     tokenizer.pad_token = tokenizer.eos_token
 
     start_epoch = 0
@@ -138,6 +131,7 @@ if __name__ == "__main__":
     wandb.init(project="smollm2-finetuning", tags=["AdamW", "LoRA", "LastRealToken"])
     wandb.config.update({"batch_size": batch_size, "learning_rate": learning_rate, "epochs": epochs})
 
+    scaler = torch.cuda.amp.GradScaler()
 
     # Training loop
     for epoch in range(start_epoch, epochs):
@@ -146,10 +140,14 @@ if __name__ == "__main__":
         train_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1} Training", leave=False)
         for idx, batch in enumerate(train_bar):
             sentences = batch["sentence"]
-            label = batch["eos_label"].to(device)
-            inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True).to(device)
-            logits = model(inputs)
-            loss = criterion(logits, label)
+            label = batch["eos_label"].to(device, non_blocking=True)
+            inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True).to(device, non_blocking=True)
+            with torch.cuda.amp.autocast():
+                logits = model(inputs)
+                loss = criterion(logits, label)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss = loss.item()
 
             optimizer.zero_grad()
@@ -157,15 +155,13 @@ if __name__ == "__main__":
             optimizer.step()
 
             train_bar.set_postfix(train_loss=loss.item())
-            if (idx + 1) % 10 == 0:
+            if (idx + 1) % 50 == 0:
                 # predictions = torch.argmax(logits, dim=1)
                 probs = torch.sigmoid(logits)
                 predictions = (probs > 0.5).float()
                 correct = (predictions == label).sum().item()
                 accuracy = 100 * correct / label.size(0)
                 wandb.log({"Train Step Loss": loss.item(), "Train Step Accuracy": accuracy})
-                # print(
-                #     f"Epoch [{epoch + 1}/{epochs}], Step [{idx + 1}/{len(train_dataloader)}], Loss: {loss.item():.4f}")
 
         # Validation / Testing after each epoch
         model.eval()
@@ -176,10 +172,12 @@ if __name__ == "__main__":
             val_bar = tqdm(test_dataloader, desc=f"Epoch {epoch+1} Validation", leave=False)
             for batch in val_bar:
                 sentences = batch["sentence"]
-                labels = batch["eos_label"].to(device)
-                inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True).to(device)
-                logits = model(inputs)
-                loss = criterion(logits, labels)
+                labels = batch["eos_label"].to(device, non_blocking=True)
+                inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True).to(device,
+                                                                                                     non_blocking=True)
+                with torch.cuda.amp.autocast():
+                    logits = model(inputs)
+                    loss = criterion(logits, labels)
                 val_loss += loss.item()
                 # probabilities = torch.softmax(logits, dim=1)
                 # predictions = torch.argmax(probabilities, dim=1)
@@ -196,14 +194,14 @@ if __name__ == "__main__":
         print(f"Validation Accuracy after epoch {epoch + 1}: {accuracy:.2f}%")
 
         # Save checkpoint after each epoch
-        checkpoint_path = f"./checkpoints/hard/checkpoint_epoch_{epoch + 1}.pth"
+        saved_checkpoint_path = f"./checkpoints/360M/checkpoint_epoch_{epoch + 1}.pth"
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'train_loss': running_loss,
             'validation_loss': val_loss / len(test_dataloader),
-        }, checkpoint_path)
+        }, saved_checkpoint_path)
 
     print("Finetuning complete!")
     wandb.finish()
