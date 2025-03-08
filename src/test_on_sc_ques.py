@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 lt.monkey_patch()
 base_checkpoint = "HuggingFaceTB/SmolLM2-360M"
-checkpoint_path = "checkpoints/hard/checkpoint_epoch_2.pth"
+checkpoint_path = "../checkpoints/hard/checkpoint_epoch_2.pth"
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 chance_to_remove_end = 0.8
 batch_size = 24
@@ -21,7 +21,7 @@ processed_data = []
 
 
 def create_data():
-    with open("data/SC-Ques/test.jsons", "r") as f:
+    with open("../data/SC-Ques/test.jsons", "r") as f:
         for line in f.readlines():
             dict_line = json.loads(line)
             split_sentence = dict_line["stem"].split("___")
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(base_checkpoint)
     tokenizer.pad_token = tokenizer.eos_token
 
-    test_dataset = EosDataset_SC("data/SC-Ques/processed_test_no_punct.csv")
+    test_dataset = EosDataset_SC("../data/SC-Ques/processed_test_no_punct.csv")
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     eos_tokens = ["<|endoftext|>", ".", "?", "!", ";", "\n", "\n\n", "\n\n\n", "\n\n\n\n", ".\"", "\xa0", ".”", ".)",

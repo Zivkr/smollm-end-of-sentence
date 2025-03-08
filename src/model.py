@@ -1,63 +1,12 @@
-import os
-import random
-import pandas as pd
-import torch
-import torch.nn as nn
 import pytorch_lightning as pl
+import torch
 from peft import LoraConfig, get_peft_model
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from lightning.pytorch.loggers import WandbLogger
-from dotenv import load_dotenv
+from torch import nn as nn
 from torchmetrics import Accuracy
-import wandb
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from config import base_checkpoint, device, criterion
 
 
-load_dotenv()
-batch_size = 24
-learning_rate = 3e-4
-epochs = 1
-base_checkpoint = "HuggingFaceTB/SmolLM2-360M"
-checkpoint_path = "checkpoints/checkpoint_epoch_2.pth"
-device = "mps" if torch.backends.mps.is_available() else "cpu"
-chance_to_remove_end = 0.8
-use_checkpoint = False
-criterion = nn.BCEWithLogitsLoss()
-
-
-class EosDataset(Dataset):
-    def __init__(self, csv_file):
-        df = pd.read_csv(csv_file)
-        self.sentence = df["sentence"].tolist()
-
-    def __len__(self):
-        return len(self.sentence)
-
-    def __getitem__(self, idx):
-        sentence = self.sentence[idx]
-        label = 1  # Default label for full sentence
-        # Truncate the sentence
-        if random.random() < 0.5:
-            words = sentence.split()
-            if len(words) > 2:  # Ensure at least one word remains
-                num_words_to_remove = random.randint(1, len(words) - 2)
-                sentence = " ".join(words[:-num_words_to_remove])
-                label = 0
-        else:
-            # Don't truncate the sentence
-            random_chance = random.random()
-            # delete the symbol at the end of the sentence 80% of the time
-            if sentence[-1] in ".!?" and random_chance < chance_to_remove_end:
-                sentence = sentence[:-1]
-
-        return {
-            'sentence': sentence,
-            'eos_label': torch.tensor(label, dtype=torch.float32)
-        }
-
-
-# Pytorch Module
 class SmolLM(pl.LightningModule):
     def __init__(self, learning_rate=3e-4):
         super().__init__()
@@ -140,30 +89,3 @@ class SmolLM(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.learning_rate)
         return optimizer
-
-
-if __name__ == "__main__":
-    # Load dataset
-    train_dataset = EosDataset("data/train_split.csv")
-    test_dataset = EosDataset("data/test_split.csv")
-
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4,
-                                  persistent_workers=True)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4,
-                                 persistent_workers=True)
-    print(f"Train dataset size: {len(train_dataset)}, Test dataset size: {len(test_dataset)}")
-
-    # start_epoch = 0
-    # Load checkpoint if available
-    if use_checkpoint and os.path.isfile(checkpoint_path):
-        model = SmolLM.load_from_checkpoint(checkpoint_path, map_location=device)
-    else:
-        model = SmolLM(learning_rate).to(device)
-
-    wandb_logger = WandbLogger(project="smollm2-finetuning", log_model=True, tags=["AdamW", "LoRA", "LastRealToken"])
-    wandb_logger.experiment.config.update({"batch_size": batch_size, "learning_rate": learning_rate, "epochs": epochs})
-
-    # Training
-    trainer = pl.Trainer(accelerator="auto", max_epochs=epochs, log_every_n_steps=50, logger=wandb_logger)
-    trainer.fit(model, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
-    wandb.finish()
