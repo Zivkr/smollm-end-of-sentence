@@ -3,12 +3,18 @@ import random
 import pandas as pd
 import torch
 import torch.nn as nn
+import pytorch_lightning as pl
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from lightning.pytorch.loggers import WandbLogger
+from dotenv import load_dotenv
+from torchmetrics import Accuracy
 import wandb
 
+
+load_dotenv()
 batch_size = 24
 learning_rate = 3e-4
 epochs = 1
@@ -17,6 +23,7 @@ checkpoint_path = "checkpoints/checkpoint_epoch_2.pth"
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 chance_to_remove_end = 0.8
 use_checkpoint = False
+criterion = nn.BCEWithLogitsLoss()
 
 
 class EosDataset(Dataset):
@@ -51,10 +58,13 @@ class EosDataset(Dataset):
 
 
 # Pytorch Module
-class SmolLM(torch.nn.Module):
-    def __init__(self):
+class SmolLM(pl.LightningModule):
+    def __init__(self, learning_rate=3e-4):
         super().__init__()
+        self.learning_rate = learning_rate
+        self.criterion = criterion
         self.tokenizer = AutoTokenizer.from_pretrained(base_checkpoint)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
         self.base_model = AutoModelForCausalLM.from_pretrained(base_checkpoint).to(device)
         self.base_model.lm_head = nn.Identity()
         self.classifier = nn.Sequential(
@@ -78,7 +88,8 @@ class SmolLM(torch.nn.Module):
         )
         self.base_model = get_peft_model(self.base_model, lora_config)
         self.base_model.print_trainable_parameters()
-        # self.model.config.output_hidden_states = True
+        self.save_hyperparameters()
+        self.val_accuracy = Accuracy(task="binary")
 
     def forward(self, x):
         input_ids = x["input_ids"]
@@ -100,6 +111,36 @@ class SmolLM(torch.nn.Module):
         output_logits = self.classifier(last_logits)
         return output_logits.squeeze(-1)
 
+    def training_step(self, batch, batch_idx):
+        sentences = batch["sentence"]
+        labels = batch["eos_label"].to(device)
+        inputs = self.tokenizer(sentences, return_tensors="pt", padding=True, truncation=True).to(device)
+        logits = self(inputs)
+        loss = self.criterion(logits, labels)
+        self.log('Train Step Loss', loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        sentences = batch["sentence"]
+        labels = batch["eos_label"].to(device)
+        inputs = self.tokenizer(sentences, return_tensors="pt", padding=True, truncation=True).to(device)
+        logits = self(inputs)
+        loss = self.criterion(logits, labels)
+        preds = (torch.sigmoid(logits) > 0.5).long()
+        self.val_accuracy.update(preds, labels.long())
+        self.log('Validation Step Loss', loss, prog_bar=True)
+        return loss
+
+    def on_validation_epoch_end(self):
+        # Compute and log the overall validation accuracy
+        acc = self.val_accuracy.compute()
+        self.log('Validation Accuracy', acc, prog_bar=True)
+        self.val_accuracy.reset()
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.learning_rate)
+        return optimizer
+
 
 if __name__ == "__main__":
     # Load dataset
@@ -112,96 +153,17 @@ if __name__ == "__main__":
                                  persistent_workers=True)
     print(f"Train dataset size: {len(train_dataset)}, Test dataset size: {len(test_dataset)}")
 
-    model = SmolLM().to(device)
-    tokenizer = AutoTokenizer.from_pretrained(base_checkpoint)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    start_epoch = 0
+    # start_epoch = 0
     # Load checkpoint if available
     if use_checkpoint and os.path.isfile(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        start_epoch = checkpoint['epoch']
+        model = SmolLM.load_from_checkpoint(checkpoint_path, map_location=device)
+    else:
+        model = SmolLM(learning_rate).to(device)
 
-    # Define loss function and optimizer
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
+    wandb_logger = WandbLogger(project="smollm2-finetuning", log_model=True, tags=["AdamW", "LoRA", "LastRealToken"])
+    wandb_logger.experiment.config.update({"batch_size": batch_size, "learning_rate": learning_rate, "epochs": epochs})
 
-    wandb.login(key="fcea9af553bd3f3956049026094c5146e1b87b07")
-    wandb.init(project="smollm2-finetuning", tags=["AdamW", "LoRA", "LastRealToken"])
-    wandb.config.update({"batch_size": batch_size, "learning_rate": learning_rate, "epochs": epochs})
-
-    scaler = torch.cuda.amp.GradScaler()
-
-    # Training loop
-    for epoch in range(start_epoch, epochs):
-        model.train()
-        running_loss = 0
-        train_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1} Training", leave=False)
-        for idx, batch in enumerate(train_bar):
-            sentences = batch["sentence"]
-            label = batch["eos_label"].to(device, non_blocking=True)
-            inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True).to(device, non_blocking=True)
-            with torch.cuda.amp.autocast():
-                logits = model(inputs)
-                loss = criterion(logits, label)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            running_loss = loss.item()
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            train_bar.set_postfix(train_loss=loss.item())
-            if (idx + 1) % 50 == 0:
-                # predictions = torch.argmax(logits, dim=1)
-                probs = torch.sigmoid(logits)
-                predictions = (probs > 0.5).float()
-                correct = (predictions == label).sum().item()
-                accuracy = 100 * correct / label.size(0)
-                wandb.log({"Train Step Loss": loss.item(), "Train Step Accuracy": accuracy})
-
-        # Validation / Testing after each epoch
-        model.eval()
-        total = 0
-        correct = 0
-        val_loss = 0
-        with torch.no_grad():
-            val_bar = tqdm(test_dataloader, desc=f"Epoch {epoch+1} Validation", leave=False)
-            for batch in val_bar:
-                sentences = batch["sentence"]
-                labels = batch["eos_label"].to(device, non_blocking=True)
-                inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True).to(device,
-                                                                                                     non_blocking=True)
-                with torch.cuda.amp.autocast():
-                    logits = model(inputs)
-                    loss = criterion(logits, labels)
-                val_loss += loss.item()
-                # probabilities = torch.softmax(logits, dim=1)
-                # predictions = torch.argmax(probabilities, dim=1)
-                probs = torch.sigmoid(logits)
-                predictions = (probs > 0.5).float()
-                total += labels.size(0)
-                correct += (predictions == labels).sum().item()
-
-                # Update tqdm with the current running average validation loss
-                avg_val_loss = val_loss / (idx + 1)
-                val_bar.set_postfix(val_loss=avg_val_loss)
-        accuracy = 100 * correct / total
-        wandb.log({"Validation Accuracy": accuracy, "Validation Loss": val_loss / len(test_dataloader)})
-        print(f"Validation Accuracy after epoch {epoch + 1}: {accuracy:.2f}%")
-
-        # Save checkpoint after each epoch
-        saved_checkpoint_path = f"./checkpoints/360M/checkpoint_epoch_{epoch + 1}.pth"
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_loss': running_loss,
-            'validation_loss': val_loss / len(test_dataloader),
-        }, saved_checkpoint_path)
-
-    print("Finetuning complete!")
+    # Training
+    trainer = pl.Trainer(accelerator="auto", max_epochs=epochs, log_every_n_steps=50, logger=wandb_logger)
+    trainer.fit(model, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
     wandb.finish()
