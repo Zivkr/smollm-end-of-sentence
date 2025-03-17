@@ -249,3 +249,9 @@ wandb/
 
 # Data Folders
 data/
+
+# Pytorch-lightning
+lightning_logs/
+src/lightning_logs/
+
+smollm_kaggle/
