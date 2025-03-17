@@ -10,3 +10,4 @@ device = "mps" if torch.backends.mps.is_available() else "cpu"
 chance_to_remove_end = 0.8
 use_checkpoint = False
 criterion = nn.BCEWithLogitsLoss()
+kaggle_data_path = "/kaggle/input/smollm2-everyday-conversations/"
