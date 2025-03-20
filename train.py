@@ -1,5 +1,5 @@
 import argparse
-from src.train_char_model import train_char_model
+from src.train_inner import train_inner
 from config import *
 
 
@@ -17,7 +17,7 @@ def main():
 
     args = parser.parse_args()
 
-    train_char_model(args.mode, args.device, args.epochs, args.batch_size, args.lr, args.checkpoint, args.use_checkpoint)
+    train_inner(args.mode, args.device, args.epochs, args.batch_size, args.lr, args.checkpoint, args.use_checkpoint)
 
 
 if __name__ == '__main__':
