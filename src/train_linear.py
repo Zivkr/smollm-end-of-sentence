@@ -3,16 +3,16 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
 from dotenv import load_dotenv
-from config import *
 from src.dataset import EosDataset
 from src.model import SmolLM
 import wandb
 
-if __name__ == "__main__":
+
+def train_linear_model(device, epochs, batch_size, learning_rate, checkpoint_path, use_checkpoint):
     load_dotenv()
     # Load dataset
-    train_dataset = EosDataset("../data/train_split.csv")
-    test_dataset = EosDataset("../data/test_split.csv")
+    train_dataset = EosDataset("data/train_split.csv")
+    test_dataset = EosDataset("data/test_split.csv")
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4,
                                   persistent_workers=True)
@@ -34,3 +34,4 @@ if __name__ == "__main__":
     trainer = pl.Trainer(accelerator="auto", max_epochs=epochs, log_every_n_steps=50, logger=wandb_logger)
     trainer.fit(model, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
     wandb.finish()
+    return
