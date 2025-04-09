@@ -241,6 +241,8 @@ fabric.properties
 # Android studio 3.1+ serialized cache file
 .idea/caches/build_file_checksums.ser
 
+.idea/*.iml
+
 # PyPI configuration file
 .pypirc
 
@@ -255,3 +257,5 @@ lightning_logs/
 src/lightning_logs/
 
 smollm_kaggle/
+checkpoints/
+untracked/
