@@ -1,0 +1,11 @@
+pytorch-lightning
+torch
+peft
+torchmetrics
+transformers
+pandas
+lightning
+python-dotenv
+tqdm
+huggingface-hub
+wandb
