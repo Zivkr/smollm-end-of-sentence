@@ -259,3 +259,4 @@ src/lightning_logs/
 smollm_kaggle/
 checkpoints/
 untracked/
+*/.gradio/

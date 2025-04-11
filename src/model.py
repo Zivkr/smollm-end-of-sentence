@@ -17,7 +17,6 @@ class SmolLM(pl.LightningModule):
         self.base_model = AutoModelForCausalLM.from_pretrained(base_checkpoint).to(device)
         self.base_model.lm_head = nn.Identity()
         self.classifier = nn.Sequential(
-            # nn.Linear(self.base_model.lm_head.out_features, 1024),
             nn.Linear(960, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
@@ -30,13 +29,11 @@ class SmolLM(pl.LightningModule):
             r=8,
             lora_alpha=32,
             target_modules=["q_proj", "v_proj", 'k_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'],
-            # Target modules for LoRA
             lora_dropout=0.0,
             bias="none",
             use_dora=True
         )
         self.base_model = get_peft_model(self.base_model, lora_config)
-        self.base_model.print_trainable_parameters()
         self.save_hyperparameters()
         self.val_accuracy = Accuracy(task="binary")
 
@@ -44,19 +41,17 @@ class SmolLM(pl.LightningModule):
         input_ids = x["input_ids"]
         attention_mask = x["attention_mask"]
 
-        # Forward pass through the base model using the attention mask
         out = self.base_model(input_ids, attention_mask=attention_mask)
         logits = out.logits  # shape: (batch_size, seq_len, hidden_dim)
 
         # Calculate the index of the last non-padding token for each sequence
-        last_token_indices = attention_mask.sum(dim=1) - 1  # shape: (batch_size)
+        last_token_indices = attention_mask.sum(dim=1) - 1
         real_batch_size = logits.size(0)
         batch_indices = torch.arange(real_batch_size, device=device)
 
         # Select logits corresponding to the last non-padding token
-        last_logits = logits[batch_indices, last_token_indices, :]  # shape: (batch_size, hidden_dim)
+        last_logits = logits[batch_indices, last_token_indices, :]
 
-        # Pass the selected logits through the classifier
         output_logits = self.classifier(last_logits)
         return output_logits.squeeze(-1)
 
@@ -81,7 +76,6 @@ class SmolLM(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        # Compute and log the overall validation accuracy
         acc = self.val_accuracy.compute()
         self.log('Validation Accuracy', acc, prog_bar=True)
         self.val_accuracy.reset()
